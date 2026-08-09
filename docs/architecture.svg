@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 560" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <rect width="680" height="560" fill="#f7f8fa"/>
+  <text x="340" y="34" font-size="20" font-weight="700" fill="#1a2b4a" text-anchor="middle">雪哨 v2 · 端到端工作流程</text>
+  <text x="340" y="54" font-size="12" fill="#6b7785" text-anchor="middle">Cookie 来源 → NAS 常驻后端 → 渲染 400×300 1-bit 图 → 推 Zectrix 云 → 墨水屏唤醒显示</text>
+
+  <!-- ===== ① 输入层 ===== -->
+  <rect x="20" y="78" width="640" height="70" rx="10" fill="#eef4ff" stroke="#5b8def" stroke-width="1.5"/>
+  <text x="36" y="100" font-size="13" font-weight="700" fill="#1a2b4a">① Cookie 来源（两条通道，汇入 cookies_store 加密库）</text>
+  <rect x="40" y="110" width="280" height="28" rx="6" fill="#fff" stroke="#c4d3ec"/>
+  <text x="52" y="129" font-size="11.5" fill="#33415c">A · 浏览器「Cookie 管家」→ POST /api/set-cookies :8899</text>
+  <rect x="340" y="110" width="300" height="28" rx="6" fill="#fff" stroke="#c4d3ec"/>
+  <text x="352" y="129" font-size="11.5" fill="#33415c">B · 浏览器写入目录→SynologyDrive同步→cookies-import.json</text>
+
+  <!-- 箭头 ①→② -->
+  <line x1="340" y1="148" x2="340" y2="168" stroke="#8a98ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ===== ② 处理层 ===== -->
+  <rect x="20" y="170" width="640" height="190" rx="10" fill="#fff7ec" stroke="#e0a33e" stroke-width="1.5"/>
+  <text x="36" y="192" font-size="13" font-weight="700" fill="#7a4f12">② NAS 常驻后端（Python 单进程 · 每 poll_interval_minutes 唤醒一次，默认 10 分钟）</text>
+
+  <rect x="40" y="202" width="150" height="48" rx="6" fill="#fff" stroke="#e0a33e"/>
+  <text x="50" y="221" font-size="11" fill="#33415c">1 加载 cookie</text>
+  <text x="50" y="237" font-size="11" fill="#33415c">（decrypt .enc）</text>
+
+  <rect x="208" y="202" width="150" height="48" rx="6" fill="#fff" stroke="#e0a33e"/>
+  <text x="218" y="221" font-size="11" fill="#33415c">2 解析特别关注</text>
+  <text x="218" y="237" font-size="11" fill="#33415c">（缓存优先）</text>
+
+  <rect x="376" y="202" width="150" height="48" rx="6" fill="#fff" stroke="#e0a33e"/>
+  <text x="386" y="221" font-size="11" fill="#33415c">3 抓雪球 timeline</text>
+  <text x="386" y="237" font-size="11" fill="#33415c">（api 子域免 WAF）</text>
+
+  <line x1="190" y1="226" x2="206" y2="226" stroke="#e0a33e" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="358" y1="226" x2="374" y2="226" stroke="#e0a33e" stroke-width="2" marker-end="url(#ar)"/>
+
+  <rect x="544" y="202" width="100" height="48" rx="6" fill="#fff" stroke="#e0a33e"/>
+  <text x="554" y="221" font-size="11" fill="#33415c">while True</text>
+  <text x="554" y="237" font-size="11" fill="#33415c">→ sleep ×60</text>
+  <line x1="526" y1="226" x2="542" y2="226" stroke="#e0a33e" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- 分叉 -->
+  <text x="36" y="278" font-size="12" font-weight="700" fill="#7a4f12">4 分叉推送：</text>
+  <rect x="40" y="286" width="290" height="58" rx="6" fill="#eafaf0" stroke="#3aa76d"/>
+  <text x="52" y="306" font-size="11.5" fill="#1e5638" font-weight="700">4a / 5a 墨水屏 Sink（Zectrix）</text>
+  <text x="52" y="324" font-size="11" fill="#1e5638">render_digest → 400×300 1-bit PNG</text>
+  <text x="52" y="338" font-size="11" fill="#1e5638">→ push_image（pageId=1, dither=false）</text>
+
+  <rect x="350" y="286" width="290" height="58" rx="6" fill="#fdeef3" stroke="#d05b86"/>
+  <text x="362" y="306" font-size="11.5" fill="#7a2147" font-weight="700">4b / 5b 手机 Sink</text>
+  <text x="362" y="324" font-size="11" fill="#7a2147">set_recent_posts（缓存）→ push_phone</text>
+  <text x="362" y="338" font-size="11" fill="#7a2147">wecom / bark / http（按 seen_ids 去重）</text>
+
+  <line x1="190" y1="254" x2="190" y2="286" stroke="#e0a33e" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="495" y1="254" x2="495" y2="286" stroke="#e0a33e" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- 箭头 ②→③ -->
+  <line x1="185" y1="360" x2="185" y2="384" stroke="#8a98ad" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="495" y1="360" x2="495" y2="384" stroke="#8a98ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ===== ③ 输出层 ===== -->
+  <rect x="20" y="386" width="640" height="78" rx="10" fill="#eef9fb" stroke="#3aa7c2" stroke-width="1.5"/>
+  <text x="36" y="408" font-size="13" font-weight="700" fill="#0f4c5c">③ 终端设备</text>
+  <rect x="40" y="418" width="290" height="34" rx="6" fill="#fff" stroke="#bfe3ec"/>
+  <text x="52" y="440" font-size="11.5" fill="#0f4c5c">Zectrix 墨水屏：深度休眠 → 唤醒拉取 pageId=1 显示</text>
+  <rect x="350" y="418" width="290" height="34" rx="6" fill="#fff" stroke="#bfe3ec"/>
+  <text x="362" y="440" font-size="11.5" fill="#0f4c5c">手机：企业微信/Bark/APP 收新帖（或 GET /api/posts）</text>
+
+  <!-- 部署链路 -->
+  <rect x="20" y="480" width="640" height="64" rx="10" fill="#f3f0fb" stroke="#8a6fd6" stroke-width="1.5"/>
+  <text x="36" y="500" font-size="12.5" font-weight="700" fill="#3b2a6b">部署链路（本地改 → 同步 NAS → 守护常驻）</text>
+  <text x="36" y="520" font-size="11" fill="#4a3b75">D:\SynologyDrive\CODING\xueqiu-watch-v2  ──sync──▶  /share/nas02/xueqiu-watch-v2/run</text>
+  <text x="36" y="536" font-size="11" fill="#4a3b75">start-xueqiu.sh：setsid python3.12 -u main.py（QTS 任务排程开机执行，防重自启）</text>
+
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8a98ad"/>
+    </marker>
+  </defs>
+</svg>

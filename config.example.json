@@ -1,0 +1,25 @@
+{
+  "zectrix": {
+    "api_key": "zt_xxxxxxxxxxxxxxxx",
+    "device_mac": "AA:BB:CC:DD:EE:FF",
+    "page_id": "1"
+  },
+  "followed_user_ids": ["__auto__"],
+  // 可选值：
+  //   ["__auto__"]        → 自动从雪球「特别关注」分组拉取成员（推荐，零配置）
+  //   ["1234567890", …]   → 手动指定数字 user_id（或昵称，会自动解析）
+  //   混合也行：["__auto__", "额外手动ID"]
+  "poll_interval_minutes": 10,
+  "digest_count": 6,
+  "font_path": "",
+  "server_port": 8080,
+  "cookie_import_file": "/share/Public/xueqiu-cookies/cookies-import.json",
+  // 浏览器「Cookie 管家」快捷写入目录后，经 SynologyDrive/QNAP 同步落到 NAS 的文件路径。
+  // 留空则只用 HTTP 推送（POST /api/set-cookies）获取 cookie。两者可并存。
+
+  "phone": {
+    "enabled": false,
+    "type": "wecom",
+    "webhook": ""
+  }
+}

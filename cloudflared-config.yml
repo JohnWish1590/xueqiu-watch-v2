@@ -1,0 +1,14 @@
+# Cloudflare Tunnel 配置：只把 /api/posts（手机读）暴露到公网
+# /api/set-cookies（写 cookie）留在内网，绝不经过隧道，避免被公网覆盖。
+#
+# 用法：
+#   cloudflared tunnel --config cloudflared-config.yml run <你的隧道名>
+#
+# 首次需先：cloudflared login  然后  cloudflared tunnel create xueqiu-watch
+tunnel: xueqiu-watch
+ingress:
+  - path: /api/posts
+    service: http://127.0.0.1:8080
+  - path: /api/health
+    service: http://127.0.0.1:8080
+  - service: http_status:404

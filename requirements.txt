@@ -1,0 +1,7 @@
+# 雪哨 v2 后端依赖（全部可选，零依赖可运行核心功能）
+# Pillow: 墨水屏渲染（缺省时跳过渲染，抓取/API/手机推送正常）
+# requests: 未使用（代码已全部走 urllib），保留仅作备用
+# cryptography: cookie 加密存储（缺省时自动降级 base64 混淆）
+Pillow>=10.0.0
+requests>=2.31.0
+cryptography>=42.0.0

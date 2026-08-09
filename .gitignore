@@ -1,0 +1,11 @@
+# 运行时生成
+config.json
+cookies.json.enc
+secret.key
+state.json
+group_cache.json
+xw.log
+cf.log
+.venv/
+__pycache__/
+*.pyc
