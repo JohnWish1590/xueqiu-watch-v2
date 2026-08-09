@@ -1,16 +1,14 @@
-# 雪哨 v2（xueqiu-watch-v2）
+# xueqiu-watch-v2
 
 把你在雪球**特别关注**的用户帖子，定时抓下来、渲染成 **400×300 1-bit 墨水屏图**，推送到
 **极趣云（Zectrix）墨水屏**，并可同时推到**手机**（企业微信 / Bark / 自建 APP）。
 
-相比原版「雪哨」Chrome 插件（依赖你电脑常开 + 浏览器在线），v2 把抓取/渲染/推送搬到了一台
-**常驻设备**（这里用你的 QNAP TS-231P NAS），实现：
+这是一个**独立运行的后端服务**，部署在 NAS / 树莓派 / 任何能跑 Python 的设备上，
+不依赖电脑常开、不依赖浏览器在线。
 
-- 不依赖电脑开机、不依赖 Chrome 常开；
-- Cookie 从浏览器「Cookie 管家」一次性导出到 NAS，之后自动续用（雪球 cookie 仍会几周过期，过期后重导一次即可）；
-- 墨水屏 + 手机多目标推送（Sink 模式，可扩展）。
+![设备实拍](device-photo.jpg)
 
-> 项目代号「雪哨」，仓库名 `xueqiu-watch`。配套文档见 [FEATURES.md](FEATURES.md)（功能说明）、
+> 配套文档见 [FEATURES.md](FEATURES.md)（功能说明）、
 > [RELEASE_NOTES.md](RELEASE_NOTES.md)（版本记录）、[DEBUG_LOG.md](DEBUG_LOG.md)（踩坑与调试记录）。
 > 端到端流程图见 [docs/architecture.svg](docs/architecture.svg)。
 
