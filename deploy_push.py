@@ -23,7 +23,7 @@ NAS_PASS = os.environ.get('NAS_PASS', '')
 if not NAS_PASS:
     sys.exit('[deploy] 错误：请先 export NAS_PASS 再运行（切勿把密码写死在脚本里）。')
 
-SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.dirname(os.path.abspath(__file__))
 RUN = '/share/nas02/xueqiu-watch-v2/run'
 DST = '/share/nas02/xueqiu-watch-v2'
 PY = os.environ.get(
