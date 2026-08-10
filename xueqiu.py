@@ -171,6 +171,54 @@ def fetch_all(followed_ids, cookie_header):
     return posts
 
 
+def fetch_group_members_all(gid, cookie_header):
+    """分页拉取「特别关注」分组全部成员。
+
+    雪球 friendships/groups/members.json 默认每页约 20 人，分组超过 20 人时
+    只取第 1 页会漏掉后排成员（与雪哨 Chrome 扩展 v1.5.3 修复的同一 bug）。
+    这里照搬扩展版 fetchGroupMembersAll 的逻辑：按 page 翻页，每页 20，
+    到末页（空响应）或响应里的 maxPage 即停，最多 50 页（≈1000 人）。
+
+    返回原始成员 dict 列表（未归一化）；失败/无成员返回 []。
+    """
+    all_users = []
+    seen_ids = set()
+    for page in range(1, 51):  # 最多 50 页
+        url = (f'{XQ_BASE}/friendships/groups/members.json'
+               f'?gid={gid}&page={page}&count=20')
+        try:
+            raw = _req(url, cookie_header)
+            d = json.loads(raw)
+        except Exception as e:
+            print(f'  [special] members 第 {page} 页请求失败: {e}')
+            break
+        # 兼容多种响应形态
+        if isinstance(d, list):
+            users, meta = d, {}
+        elif isinstance(d, dict):
+            users, meta = d.get('users') or [], d
+        else:
+            users, meta = [], {}
+        # 嵌套 {groups:[{users:[...]}]} 形态
+        if not users and isinstance(meta, dict):
+            for mg in (meta.get('groups') or []):
+                if isinstance(mg.get('users'), list) and mg['users']:
+                    users = mg['users']
+                    break
+        if not users:
+            break  # 末页（空）→ 停止翻页
+        for u in users:
+            uid = str(u.get('id') or '')
+            if uid and uid not in seen_ids:
+                seen_ids.add(uid)
+                all_users.append(u)
+        # 命中 maxPage 即停
+        max_page = meta.get('maxPage') if isinstance(meta, dict) else None
+        if max_page and page >= int(max_page):
+            break
+    return all_users
+
+
 def fetch_special_follow(cookie_header):
     """从雪球「特别关注」分组自动拉取成员列表。
     复用原版 Chrome 扩展 background.js getSpecialFollowUsers() 的完全相同逻辑：
@@ -210,27 +258,14 @@ def fetch_special_follow(cookie_header):
     if isinstance(users, list) and users:
         return [_norm_user(u) for u in users]
 
-    # 否则拉成员列表
+    # 否则分页拉取全部成员（修复：members.json 默认每页 ~20 人，
+    # 只取第 1 页会漏掉 >20 人的分组后排成员——与雪哨 Chrome 扩展 v1.5.3 修的同一 bug）
     gid = target.get('id')
     if not gid:
         print('  [special] 分组缺少 id 字段，无法拉成员')
         return []
-    try:
-        raw_m = _req(f'{XQ_BASE}/friendships/groups/members.json?gid={gid}', cookie_header)
-        m_data = json.loads(raw_m)
-    except Exception as e:
-        print('  [special] members.json 请求失败:', e)
-        return []
-
-    m_users = (m_data if isinstance(m_data, list)
-               else m_data.get('users') or [])
-    # 兼容嵌套形态 {groups: [{users: [...]}]}
-    if not m_users and isinstance(m_data.get('groups'), list):
-        for mg in m_data['groups']:
-            if isinstance(mg.get('users'), list) and mg['users']:
-                m_users = mg['users']
-                break
-    return [_norm_user(u) for u in m_users]
+    raw_users = fetch_group_members_all(gid, cookie_header)
+    return [_norm_user(u) for u in raw_users]
 
 
 def _norm_user(u):

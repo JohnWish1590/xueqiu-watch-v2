@@ -33,6 +33,7 @@ PY = os.environ.get(
 
 # (local_rel, remote_rel) —— 只同步改动过的文件
 FILES = [
+    ('xueqiu.py', 'xueqiu.py'),
     ('eink.py', 'eink.py'),
     ('bitmapfont.py', 'bitmapfont.py'),
     ('fonts/font12.xwbf', 'fonts/font12.xwbf'),
@@ -92,6 +93,12 @@ def main():
         if 'code":0' in tail or 'code:0' in tail or 'code=0' in tail:
             print('>>> 推送成功 (code:0)')
             break
+
+    # 清掉特别关注成员缓存，强制下一轮用新分页逻辑重新拉全部分组
+    # （否则 main.py 会一直用本地 group_cache.json 里的旧 20 人名单，修复不生效）
+    print('--- 清除 group_cache.json（强制重拉特别关注分组）---')
+    _, o, e = c.exec_command(f'rm -f {RUN}/group_cache.json {DST}/group_cache.json; echo cleared')
+    print(o.read().decode().strip())
 
     c.close()
     print('\nDone.')
