@@ -197,3 +197,5 @@ python tools/gen_songs_fonts.py fang kai  # 只生成指定字体
 生成器支持多款字体（`tools/gen_songs_fonts.py` 里的 `FONTS` 字典）：`song` 宋体（默认）、
 `fang` 仿宋、`kai` 楷体、`deng` 等线-细、`hira` Hiragino Sans GB W3。切换显示字体在 `eink.py`
 的 `render_digest(..., font_tag='')` 参数，对应字库 `fonts/font{size}_{tag}.xwbf`。
+
+Socials: @下一站澳门. DM for inquiries.
