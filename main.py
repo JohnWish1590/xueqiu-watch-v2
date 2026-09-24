@@ -199,7 +199,12 @@ def run_once(cfg, state, first_run=False):
         _push_error('特别关注分组解析异常：\n%s' % e, cfg)
         return
     if not followed:
-        _push_error('特别关注分组为空\nCookie 可能已失效\n请重新导出', cfg)
+        detail = getattr(xueqiu, 'LAST_ERROR', '') or ''
+        reason = '特别关注分组拉取为空'
+        if detail:
+            reason += '\n%s' % detail
+        reason += '\n请重新导出 Cookie'
+        _push_error(reason, cfg)
         return
 
     try:
@@ -208,7 +213,12 @@ def run_once(cfg, state, first_run=False):
         _push_error('雪球抓取异常：\n%s' % e, cfg)
         return
     if not posts:
-        _push_error('本周期未抓到任何帖子\n接口可能被拦截\n或 Cookie 已失效', cfg)
+        detail = getattr(xueqiu, 'LAST_ERROR', '') or ''
+        reason = '本周期未抓到任何帖子'
+        if detail:
+            reason += '\n%s' % detail
+        reason += '\n请重新导出 Cookie'
+        _push_error(reason, cfg)
         return
 
     # 更新共享缓存，供手机 APP 的 GET /api/posts 读取（不触发新的抓取）

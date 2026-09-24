@@ -25,6 +25,24 @@ class WafBlocked(Exception):
     """请求被阿里云 WAF 挑战页拦截（返回的不是 JSON）。"""
 
 
+class XueqiuError(Exception):
+    """雪球接口返回错误（消息里带 error_code，如 400016 = 登录态失效）。"""
+
+
+LAST_ERROR = ''   # 最近一次请求失败的原因（含 error_code），供主程序在墨水屏上显示
+
+
+def _err_detail(body):
+    """从错误响应体里抽出 error_code + error_description，便于一眼定位。"""
+    try:
+        j = json.loads(body)
+    except Exception:
+        return ''
+    if isinstance(j, dict) and j.get('error_code'):
+        return '%s %s' % (j['error_code'], j.get('error_description') or '')
+    return ''
+
+
 def _is_waf(body):
     if not body:
         return False
@@ -35,6 +53,7 @@ def _is_waf(body):
 
 
 def _req(url, cookie_header, timeout=12):
+    global LAST_ERROR
     req = urllib.request.Request(url)
     req.add_header('Cookie', cookie_header)
     req.add_header('User-Agent', UA)
@@ -43,10 +62,21 @@ def _req(url, cookie_header, timeout=12):
     req.add_header('Accept-Encoding', 'identity')
     req.add_header('Referer', 'https://%s/' % urllib.parse.urlparse(url).netloc)
     req.add_header('X-Requested-With', 'XMLHttpRequest')
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read().decode('utf-8', 'ignore')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode('utf-8', 'ignore')
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read().decode('utf-8', 'ignore')
+        except Exception:
+            raw = ''
+        detail = _err_detail(raw)
+        LAST_ERROR = 'HTTP %s%s' % (e.code, (' ' + detail) if detail else '')
+        raise XueqiuError(LAST_ERROR)
     if _is_waf(body):
+        LAST_ERROR = '被 WAF 挑战页拦截'
         raise WafBlocked(url)
+    LAST_ERROR = ''
     return body
 
 
