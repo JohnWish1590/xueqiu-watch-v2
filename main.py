@@ -152,6 +152,30 @@ def maybe_import_from_file(cfg):
         print('[import] 读取同步 cookie 文件失败:', e)
 
 
+def _push_error(reason, cfg):
+    """抓取失败时在墨水屏上渲染并推送一张满屏错误图，让用户能立刻发现异常。
+
+    与正常摘要图同走 Zectrix 推送；渲染/推送任何异常都不抛出（避免掩盖原错误）。
+    """
+    zx = cfg.get('zectrix') or {}
+    api_key = zx.get('api_key')
+    mac = zx.get('device_mac')
+    page_id = zx.get('page_id', '1')
+    font_path = cfg.get('font_path', '') or None
+    try:
+        img = eink.render_error(reason, font_path=font_path)
+        if img is None:
+            print('[run] 错误图渲染不可用（字库缺失），仅记录日志')
+            return
+        if api_key and mac:
+            code, txt = eink.push_image(api_key, mac, img, page_id)
+            print(f'[run] 错误图推送 {code}: {str(txt)[:80]}')
+        else:
+            print('[run] 未配置 zectrix，跳过错误图推送（错误已在日志体现）')
+    except Exception as e:
+        print('[run] 错误图渲染/推送异常:', e)
+
+
 def run_once(cfg, state, first_run=False):
     zx = cfg.get('zectrix') or {}
     api_key = zx.get('api_key')
@@ -166,17 +190,25 @@ def run_once(cfg, state, first_run=False):
     cookies = cookies_store.load_cookies()
     xq = (cookies.get('xueqiu') or {}).get('header')
     if not xq:
-        print('[run] 无雪球 cookie，跳过本轮（请在浏览器 Cookie 管家点“导出到 NAS”或配置 cookie_import_file）')
+        _push_error('未读到雪球 Cookie\n请在浏览器 Cookie 管家\n重新导出到 NAS', cfg)
         return
 
-    followed = resolve_followed(cfg, xq)
+    try:
+        followed = resolve_followed(cfg, xq)
+    except Exception as e:
+        _push_error('特别关注分组解析异常：\n%s' % e, cfg)
+        return
     if not followed:
-        print('[run] followed_user_ids 为空，跳过')
+        _push_error('特别关注分组为空\nCookie 可能已失效\n请重新导出', cfg)
         return
 
-    posts = xueqiu.fetch_all(followed, xq)
+    try:
+        posts = xueqiu.fetch_all(followed, xq)
+    except Exception as e:
+        _push_error('雪球抓取异常：\n%s' % e, cfg)
+        return
     if not posts:
-        print('[run] 本轮未抓到帖子')
+        _push_error('本周期未抓到任何帖子\n接口可能被拦截\n或 Cookie 已失效', cfg)
         return
 
     # 更新共享缓存，供手机 APP 的 GET /api/posts 读取（不触发新的抓取）

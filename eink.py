@@ -136,6 +136,61 @@ def render_digest(posts, count=6, font_path=None, title='雪球特别关注',
     return cv
 
 
+def render_error(reason, font_path=None, font_tag=''):
+    """渲染「满屏错误」告警图（400x300 1-bit）。
+
+    用于抓取失败时让墨水屏明确显示异常（而非静默停在旧图，用户无从发现）。
+    设计：全黑底 + 白色边框 + 白色标题「雪哨获取失败」+ 白色自动折行原因 +
+    底部白色检查时间。与正常白底摘要图形成强烈反差，一眼可辨。
+
+    reason 支持 \n 主动换行，其余按像素宽度自动折行（bf.wrap_text）。
+    字库缺失返回 None。
+    """
+    def _load(size):
+        return bf.load_font_variant(size, '_' + font_tag) if font_tag else bf.load_font(size)
+    f_title = _load(FONT_TITLE)
+    f_body = _load(FONT_CONTENT)
+    f_meta = _load(FONT_META)
+    # 字体缺失兜底：逐级降用，保证至少能画出来
+    if f_body is None:
+        f_body = f_meta
+    if f_title is None:
+        f_title = f_body
+    if f_title is None or f_body is None:
+        print('[eink] 字库缺失（fonts/），无法渲染错误图。')
+        return None
+
+    WHITE = 0  # 黑底上的点 = 白字
+    cv = bf.Canvas(W, H)
+    cv.fill_rect(0, 0, W, H, 1)            # 全黑底（告警态）
+
+    # 外边框（白色）
+    cv.rect(4, 4, W - 8, H - 8, WHITE)
+
+    # 标题
+    title_y = 14
+    cv.draw_text(PAD, title_y, '雪哨获取失败', f_title, val=WHITE)
+    sep_y = title_y + f_title.height + 8
+    cv.hline(8, sep_y, W - 16, WHITE)
+
+    # 原因（自动折行，白字，限制行数避免溢出）
+    avail_w = W - 16
+    lines = bf.wrap_text(reason or '未知错误', f_body, avail_w)
+    max_lines = max(1, (H - sep_y - 28 - f_meta.height - 8) // (f_body.height + 4))
+    y = sep_y + 10
+    for line in lines[:max_lines]:
+        cv.draw_text(8, y, line, f_body, val=WHITE)
+        y += f_body.height + 4
+    if len(lines) > max_lines:
+        cv.draw_text(8, y, '…', f_body, val=WHITE)
+
+    # 底部检查时间
+    st = time.localtime()
+    stamp = '%d月%d日 %d:%02d' % (st.tm_mon, st.tm_mday, st.tm_hour, st.tm_min)
+    cv.draw_text(8, H - f_meta.height - 10, '检查 ' + stamp, f_meta, val=WHITE)
+    return cv
+
+
 def push_image(api_key, mac, img, page_id=1, timeout=15):
     """把画布推到 Zectrix 云。img 为 Canvas（或任何有 to_png() 的对象）。"""
     if img is None:

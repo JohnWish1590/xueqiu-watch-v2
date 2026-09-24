@@ -33,6 +33,7 @@ PY = os.environ.get(
 
 # (local_rel, remote_rel) —— 只同步改动过的文件
 FILES = [
+    ('main.py', 'main.py'),
     ('xueqiu.py', 'xueqiu.py'),
     ('eink.py', 'eink.py'),
     ('bitmapfont.py', 'bitmapfont.py'),

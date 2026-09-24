@@ -4,11 +4,18 @@ import re
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 XQ_BASE = 'https://xueqiu.com'
 # 关键：api.xueqiu.com 子域不挂阿里云 WAF，服务器/NAS 直连可用；
 # 主域 xueqiu.com 的 /v4/statuses/* 会被 WAF JS 挑战拦截（返回 HTML 而非 JSON）。
 XQ_API = 'https://api.xueqiu.com'
+XQ_WWW = 'https://www.xueqiu.com'
+
+# 双域兜底候选（与 Chrome 扩展 v1.5.17 的「同域重写 + 双域回退」思路一致）：
+# 雪球会在裸域 / www / api 子域之间切换，任一可用即返回。
+# 顺序：api 子域（无 WAF，首选）→ www → 裸域。
+SPECIAL_BASES = [XQ_API, XQ_WWW, XQ_BASE]
 
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
@@ -34,7 +41,7 @@ def _req(url, cookie_header, timeout=12):
     req.add_header('Accept', 'application/json, text/plain, */*')
     req.add_header('Accept-Language', 'zh-CN,zh;q=0.9')
     req.add_header('Accept-Encoding', 'identity')
-    req.add_header('Referer', 'https://xueqiu.com/')
+    req.add_header('Referer', 'https://%s/' % urllib.parse.urlparse(url).netloc)
     req.add_header('X-Requested-With', 'XMLHttpRequest')
     with urllib.request.urlopen(req, timeout=timeout) as r:
         body = r.read().decode('utf-8', 'ignore')
@@ -184,13 +191,26 @@ def fetch_group_members_all(gid, cookie_header):
     all_users = []
     seen_ids = set()
     for page in range(1, 51):  # 最多 50 页
-        url = (f'{XQ_BASE}/friendships/groups/members.json'
-               f'?gid={gid}&page={page}&count=20')
+        raw = None
+        for base in SPECIAL_BASES:
+            try:
+                raw = _req(
+                    f'{base}/friendships/groups/members.json'
+                    f'?gid={gid}&page={page}&count=20',
+                    cookie_header,
+                )
+                break
+            except WafBlocked:
+                continue
+            except Exception:
+                continue
+        if raw is None:
+            print(f'  [special] members 第 {page} 页所有域名均失败')
+            break
         try:
-            raw = _req(url, cookie_header)
             d = json.loads(raw)
         except Exception as e:
-            print(f'  [special] members 第 {page} 页请求失败: {e}')
+            print(f'  [special] members 第 {page} 页响应非 JSON: {e}')
             break
         # 兼容多种响应形态
         if isinstance(d, list):
@@ -226,11 +246,25 @@ def fetch_special_follow(cookie_header):
       2) 分组内嵌 users 则直接用，否则调 /friendships/groups/members.json?gid=xxx
     返回 [{id: '数字字符串', name: '昵称'}, ...]；失败返回 []。
     """
+    raw = None
+    last_err = None
+    for base in SPECIAL_BASES:
+        try:
+            raw = _req(f'{base}/friendships/groups.json', cookie_header)
+            break
+        except WafBlocked:
+            last_err = 'WAF@%s' % base
+            continue
+        except Exception as e:
+            last_err = '%s: %s' % (base, e)
+            continue
+    if raw is None:
+        print('  [special] groups.json 所有域名均失败：', last_err)
+        return []
     try:
-        raw = _req(f'{XQ_BASE}/friendships/groups.json', cookie_header)
         data = json.loads(raw)
     except Exception as e:
-        print('  [special] groups.json 请求失败:', e)
+        print('  [special] groups.json 响应非 JSON：', e)
         return []
 
     # 登录后返回顶层数组 [group, ...]，未登录返回 {error_code: 400016}
