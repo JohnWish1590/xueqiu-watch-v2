@@ -53,7 +53,7 @@
 | `main.py` | **单进程入口**：后台起 Cookie 接收服务 + 主线程 `while True` 轮询推送 |
 | `config.py` | 配置加载（`config.json`，敏感字段可被环境变量覆盖） |
 | `cookies_store.py` | 多站 Cookie 加密存储（`cryptography.Fernet`，缺失则降级 base64 混淆） |
-| `xueqiu.py` | 雪球 timeline 抓取与归一化（自动绕开阿里云 WAF） |
+| `xueqiu.py` | 雪球 timeline 抓取与归一化（自动绕开阿里云 WAF；v2.4.0 起改合并 `home_timeline` 取数 + 风控熔断退避，从源头消除高频请求触发 567 限流） |
 | `eink.py` | 帖子渲染成墨水屏图 + 推送到 Zectrix（Open API） |
 | `bitmapfont.py` | **纯 Python 1-bit 点阵渲染引擎**（零第三方依赖，见下方说明） |
 | `server.py` | Cookie 接收 + 帖子只读 HTTP 服务（标准库，零依赖） |
@@ -176,6 +176,7 @@ WireGuard 回家（VPN），直接用局域网 IP 访问，数据全程不出家
 ## 5. 常见问题
 
 - **墨水屏不更新 / 显示"暂无新帖子"**：九成是雪球 cookie 过期 → 重导（第 3 节）。
+- **墨水屏满屏报错（显示 `HTTP 567` / "访问提示 - 雪球"）**：这是雪球**风控限流**（后端某轮请求过密被 WAF 拦截），**不是 cookie 过期**，无需重导 cookie。v2.4.0 起已内置合并信息流 + 熔断退避自动恢复——限流解除后自动恢复正常推送；若长时间不恢复，可临时调大 `poll_interval_minutes` 或降低深扫人数（环境变量 `XW_DEEP`，默认 5）。详见 [RELEASE_NOTES.md](RELEASE_NOTES.md) v2.4.0。
 - **中文乱码/方块**：NAS 缺 CJK 字体 → 在 `config.json` 设 `font_path` 指向中文字体（或使用已生成的 `.xwbf` 点阵字库，无需系统字体）。
 - **8899 连不上**：检查 NAS 防火墙、确认后端进程在跑（`ps | grep '[m]ain.py'`）、`xw.log` 有无报错。
 - **cryptography 装不上**：代码自动降级为 base64 混淆并打警告，功能不受影响，只是 cookie 存储安全性较弱。
