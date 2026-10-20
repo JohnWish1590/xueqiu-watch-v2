@@ -1,7 +1,19 @@
-"""雪球 timeline 抓取：用浏览器导出的 Cookie 头调用雪球 API，解析成统一帖子结构。"""
+"""雪球 timeline 抓取：用浏览器导出的 Cookie 头调用雪球 API，解析成统一帖子结构。
+
+v2.1 改动（移植自雪哨 Chrome 扩展 v1.5.17+ 的防风控策略）：
+  1) 合并信息流：每轮只拉 1~2 次 home_timeline（你关注的人发的帖都在，特别关注是其
+     子集），本地按 user_id 过滤出特别关注的新帖。请求量从「N 人 × 2 页」降到 ~3 次，
+     从源头消除触发雪球 WAF/风控（HTTP 567「访问提示」）的高频请求。
+  2) 风控熔断：识别 567/429/访问提示页 → 立即熔断（停止本轮 + 指数退避）→ 冷却期内
+     跳过轮询 → 连续成功才复位。避免每轮每个用户都重撞一遍、风控标记越锁越死。
+  3) 串行 + 随机间隔的兜底深扫：每轮只直查 DEEP_PER_CYCLE 个用户（轮转），请求量极小，
+     保证合并流漏掉的低频发帖用户也能被覆盖，绝不漏帖。
+"""
 import json
 import re
 import time
+import os
+import random
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -22,7 +34,10 @@ UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 
 
 class WafBlocked(Exception):
-    """请求被阿里云 WAF 挑战页拦截（返回的不是 JSON）。"""
+    """请求被雪球风控/访问提示页拦截（HTTP 567/429/503 或返回 HTML 而非 JSON）。
+
+    上层捕获后应触发熔断并停止本轮，不要再试其他域/用户——回退只会再撞一次墙。
+    """
 
 
 class XueqiuError(Exception):
@@ -30,6 +45,74 @@ class XueqiuError(Exception):
 
 
 LAST_ERROR = ''   # 最近一次请求失败的原因（含 error_code），供主程序在墨水屏上显示
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 风控熔断（防止高频轮询触发「访问被阻断」/ 567）
+# 策略：识别阻断 → 立即熔断（停止本轮 + 指数退避）→ 冷却期内跳过轮询 → 连续成功才复位。
+# 状态持久化到文件，跨进程重启仍有效（NAS 进程偶尔会被 Task Scheduler 重启）。
+# ─────────────────────────────────────────────────────────────────────────────
+_RL_FILE = os.environ.get(
+    'XW_RL',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rl_state.json'),
+)
+_rl_state = None
+
+
+def rl_load():
+    global _rl_state
+    if _rl_state is not None:
+        return _rl_state
+    try:
+        with open(_RL_FILE, 'r', encoding='utf-8') as f:
+            _rl_state = json.load(f)
+    except Exception:
+        _rl_state = {'blockedUntil': 0, 'retryCount': 0}
+    return _rl_state
+
+
+def rl_save():
+    global _rl_state
+    try:
+        with open(_RL_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_rl_state, f)
+    except Exception:
+        pass
+
+
+def rl_is_blocked():
+    """是否处于熔断冷却期（冷却期内主程序应跳过本轮，不再发请求）。"""
+    s = rl_load()
+    return (time.time() * 1000) < s.get('blockedUntil', 0)
+
+
+def rl_backoff_min(retry_count):
+    """退避时长（分钟）：第 1 次 5 → 10 → 20 → 30 封顶。"""
+    steps = [0, 5, 10, 20, 30]
+    i = min(max(0, int(retry_count)), len(steps) - 1)
+    return steps[i]
+
+
+def rl_trip(reason):
+    """触发熔断：retryCount 递增，冷却期指数增长，并持久化。返回冷却分钟数。"""
+    s = rl_load()
+    s['retryCount'] = int(s.get('retryCount', 0)) + 1
+    mins = rl_backoff_min(s['retryCount'])
+    s['blockedUntil'] = int(time.time() * 1000) + mins * 60 * 1000
+    rl_save()
+    print('[rl] 熔断触发：%s → 暂停 %d 分钟（第 %d 次）' % (reason, mins, s['retryCount']))
+    return mins
+
+
+def rl_reset():
+    """完整跑通一轮（未被风控中断）→ 复位退避计数。"""
+    s = rl_load()
+    if int(s.get('retryCount', 0)) == 0 and int(s.get('blockedUntil', 0)) == 0:
+        return
+    s['retryCount'] = 0
+    s['blockedUntil'] = 0
+    rl_save()
+    print('[rl] 熔断解除：连续成功，重置退避计数')
 
 
 def _err_detail(body):
@@ -43,7 +126,19 @@ def _err_detail(body):
     return ''
 
 
+def looks_like_block(text):
+    """阻断页特征（雪球 WAF 页面关键词，中英文都覆盖；只看开头 2KB 足够）。"""
+    if not text or not isinstance(text, str):
+        return False
+    head = text[:2000]
+    return bool(re.search(
+        r'访问被阻断|安全威胁|被阻断|访问已被拦截|访问提示|很抱歉|'
+        r'has been blocked|access denied|blocked by|forbidden',
+        head, re.I))
+
+
 def _is_waf(body):
+    """返回的不是 JSON（HTML 风控页）。"""
     if not body:
         return False
     head = body.lstrip()[:1]
@@ -53,6 +148,7 @@ def _is_waf(body):
 
 
 def _req(url, cookie_header, timeout=12):
+    """统一请求入口。风控/限流（567/429/503/访问提示页）一律抛 WafBlocked，由上层熔断。"""
     global LAST_ERROR
     req = urllib.request.Request(url)
     req.add_header('Cookie', cookie_header)
@@ -70,27 +166,39 @@ def _req(url, cookie_header, timeout=12):
             raw = e.read().decode('utf-8', 'ignore')
         except Exception:
             raw = ''
+        # 429/503/567 或响应体是阻断页 → 风控拦截，直接熔断
+        if e.code in (429, 503, 567) or looks_like_block(raw):
+            LAST_ERROR = 'HTTP %s 风控拦截' % e.code
+            raise WafBlocked('HTTP %s' % e.code)
         detail = _err_detail(raw)
         LAST_ERROR = 'HTTP %s%s' % (e.code, (' ' + detail) if detail else '')
         raise XueqiuError(LAST_ERROR)
-    if _is_waf(body):
-        LAST_ERROR = '被 WAF 挑战页拦截'
+    if _is_waf(body) or looks_like_block(body):
+        LAST_ERROR = '被风控/访问提示页拦截'
         raise WafBlocked(url)
     LAST_ERROR = ''
     return body
 
 
 def _extract_list(data):
+    """从接口响应里抽出帖子数组，兼容多种返回形态。"""
     try:
         d = json.loads(data)
     except Exception:
         return []
     if isinstance(d, list):
         return d
-    for k in ('statuses', 'list', 'items', 'data'):
-        v = d.get(k)
-        if isinstance(v, list):
-            return v
+    if isinstance(d, dict):
+        for k in ('statuses', 'list', 'items', 'home_timeline'):
+            v = d.get(k)
+            if isinstance(v, list):
+                return v
+        sub = d.get('data')
+        if isinstance(sub, dict):
+            for k in ('statuses', 'list', 'items', 'home_timeline'):
+                v = sub.get(k)
+                if isinstance(v, list):
+                    return v
     return []
 
 
@@ -114,7 +222,23 @@ def _ts(s):
         return 0
 
 
+def _norm_post(p):
+    """统一帖子格式：{id, user(昵称), user_id, text, created_at, time}。"""
+    u = p.get('user') or {}
+    uid = str(u.get('id') if isinstance(u, dict) else p.get('user_id') or '')
+    name = (u.get('screen_name') or u.get('name') or '') if isinstance(u, dict) else ''
+    return {
+        'id': p.get('id'),
+        'user': name,
+        'user_id': uid,
+        'text': _strip(p.get('text', '')),
+        'created_at': p.get('created_at', ''),
+        'time': _ts(p.get('created_at')),
+    }
+
+
 def fetch_user_timeline(user_id, cookie_header, page=1, count=10, since_id=None):
+    """直查单用户时间线（兜底深扫用）。命中风控时抛 WafBlocked（向上熔断，不再试其他域）。"""
     since = f'&since_id={since_id}' if since_id else ''
     path = f'/v4/statuses/user_timeline.json?user_id={user_id}&page={page}&count={count}{since}'
     # 依次尝试：api 子域（无 WAF，首选）→ 主域 v4 → 主域旧版
@@ -130,8 +254,7 @@ def fetch_user_timeline(user_id, cookie_header, page=1, count=10, since_id=None)
             posts = _extract_list(_req(u, cookie_header))
             break
         except WafBlocked:
-            last_err = 'WAF'
-            continue
+            raise  # 风控 → 直接向上抛，触发熔断
         except Exception as e:
             last_err = e
             continue
@@ -140,14 +263,46 @@ def fetch_user_timeline(user_id, cookie_header, page=1, count=10, since_id=None)
         return []
     out = []
     for p in posts:
-        user = (p.get('user') or {}).get('screen_name', '')
-        out.append({
-            'id': p.get('id'),
-            'user': user,
-            'text': _strip(p.get('text', '')),
-            'created_at': p.get('created_at', ''),
-            'time': _ts(p.get('created_at')),
-        })
+        out.append(_norm_post(p))
+    return out
+
+
+def fetch_merged_timeline(cookie_header, pages=3, followed_ids=None):
+    """合并信息流取数（WAF 根治：把 N 个请求压成 1~pages 个）。
+
+    拉 home_timeline（你关注的人发的帖都在，特别关注是其子集），本地按 user_id 过滤出
+    特别关注的新帖。请求量降 ~N 倍，从源头让 WAF 触发不了。命中风控抛 WafBlocked。
+    """
+    idset = set(str(x) for x in (followed_ids or []))
+    out = []
+    seen = set()
+    for p in range(1, pages + 1):
+        variants = [
+            XQ_API + f'/v4/statuses/home_timeline.json?page={p}&count=20',
+            XQ_BASE + f'/v4/statuses/home_timeline.json?page={p}&count=20',
+            XQ_API + f'/statuses/home_timeline.json?page={p}&count=20',
+        ]
+        items = None
+        for u in variants:
+            try:
+                items = _extract_list(_req(u, cookie_header))
+                break
+            except WafBlocked:
+                raise  # 风控 → 向上抛，触发熔断
+            except Exception:
+                continue
+        if not items:
+            break  # 两个 variant 都没拿到 → 末页/异常
+        for post in items:
+            uid = str((post.get('user') or {}).get('id') or post.get('user_id') or '')
+            if idset and uid not in idset:
+                continue  # 非特别关注成员，跳过
+            pid = post.get('id')
+            if pid and pid not in seen:
+                seen.add(pid)
+                out.append(_norm_post(post))
+        if len(items) < 20:
+            break  # 不足一页 → 已是末页
     return out
 
 
@@ -169,6 +324,8 @@ def resolve_user_ids(entries, cookie_header):
                 try:
                     data = _req(u, cookie_header)
                     break
+                except WafBlocked:
+                    raise
                 except Exception:
                     continue
             if data is None:
@@ -193,6 +350,7 @@ def resolve_user_ids(entries, cookie_header):
 
 
 def fetch_all(followed_ids, cookie_header):
+    """兼容旧接口：直查每个用户时间线（深扫兜底场景仍可用，但主流程改用合并流）。"""
     resolved = resolve_user_ids(followed_ids, cookie_header)
     posts = []
     seen = set()
@@ -231,7 +389,7 @@ def fetch_group_members_all(gid, cookie_header):
                 )
                 break
             except WafBlocked:
-                continue
+                raise  # 风控直接向上抛
             except Exception:
                 continue
         if raw is None:
@@ -283,8 +441,7 @@ def fetch_special_follow(cookie_header):
             raw = _req(f'{base}/friendships/groups.json', cookie_header)
             break
         except WafBlocked:
-            last_err = 'WAF@%s' % base
-            continue
+            raise  # 风控直接向上抛
         except Exception as e:
             last_err = '%s: %s' % (base, e)
             continue

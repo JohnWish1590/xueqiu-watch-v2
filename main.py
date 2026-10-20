@@ -6,10 +6,17 @@
    -> 推墨水屏（Zectrix）+ 手机（企业微信/Bark/自定义）。
 
 单进程入口：python main.py（QNAP 上用 Task Scheduler 以 nohup 自启）。
+
+v2.1：移植雪哨 Chrome 扩展的防风控策略——
+  · 主取数改为「合并 home_timeline（~3 次请求）+ 轮转深扫（每轮 3 人）」，源头压低请求量；
+  · 接入 xueqiu 模块的风控熔断（rl_trip/rl_reset/rl_is_blocked）：命中 567/429 立即熔断、
+    指数退避、冷却期内跳过本轮、连续成功复位；
+  · 抓取失败时墨水屏满屏显示错误，让用户立刻发现。
 """
 import os
 import json
 import time
+import random
 import threading
 
 import config
@@ -20,6 +27,9 @@ import server
 
 STATE_FILE = os.environ.get('XW_STATE', 'state.json')
 GROUP_CACHE_FILE = os.environ.get('XW_GROUP', 'group_cache.json')  # 特别关注成员缓存
+DEEP_PER_CYCLE = int(os.environ.get('XW_DEEP', '5'))  # 每轮兜底深扫人数（轮转）
+DEEP_BLOCK_COOLDOWN = int(os.environ.get('XW_DEEP_COOLDOWN', '600'))  # 深扫被风控后静默秒数
+_deep_blocked_until = 0.0  # 深扫被风控时记录，静默期内不再发 user_timeline 请求（避免越锁越死）
 
 
 def load_state():
@@ -29,7 +39,7 @@ def load_state():
                 return json.load(f)
         except Exception:
             pass
-    return {'seen_ids': []}
+    return {'seen_ids': [], 'deep_idx': 0}
 
 
 def save_state(st):
@@ -176,6 +186,49 @@ def _push_error(reason, cfg):
         print('[run] 错误图渲染/推送异常:', e)
 
 
+def _deep_scan(cfg, cookie_header, followed, state):
+    """兜底深扫：每轮只直查 DEEP_PER_CYCLE 个用户（轮转），请求量极小不会触发 WAF。
+    合并流负责"即时"，深扫负责"绝不漏"，两者互补。用户之间随机睡 1~2 秒，杜绝突发。
+
+    深扫是非致命的：命中风控（user_timeline 被限流）时记录静默期、跳过本轮剩余深扫，
+    直接返回已收集的（可能为空），绝不向上抛——这样合并流已拿到的帖子仍能正常上屏，
+    不会因深扫失败而显示错误图。静默期内连请求都不发，避免反复撞墙把风控锁死。
+    """
+    global _deep_blocked_until
+    ids = [str(x) for x in followed if str(x).isdigit()]
+    if not ids:
+        return []
+    # 静默期内不发 user_timeline 请求（当前多半仍被限流，发了也是 567）
+    if time.time() < _deep_blocked_until:
+        print('[deep] 仍在风控静默期，本轮深扫跳过')
+        return []
+    n = len(ids)
+    idx = int(state.get('deep_idx', 0)) % n
+    collected = []
+    seen = set()
+    for k in range(DEEP_PER_CYCLE):
+        uid = ids[idx % n]
+        idx = (idx + 1) % n
+        try:
+            for pg in (1, 2):
+                for p in xueqiu.fetch_user_timeline(uid, cookie_header, page=pg):
+                    if p['id'] and p['id'] not in seen:
+                        seen.add(p['id'])
+                        collected.append(p)
+        except xueqiu.WafBlocked as e:
+            # user_timeline 被限流：进入静默期，停止本轮深扫，返回已收集的
+            _deep_blocked_until = time.time() + DEEP_BLOCK_COOLDOWN
+            print(f'[deep] 深扫被风控拦截（{e}），进入静默期 {DEEP_BLOCK_COOLDOWN}s，本轮深扫停止')
+            break
+        except Exception as e:
+            print(f'  [deep] 用户 {uid} 抓取失败: {e}')
+        # 节流：用户之间随机睡 1~2s，避免突发请求触发风控
+        if k < DEEP_PER_CYCLE - 1:
+            time.sleep(1 + random.random())
+    state['deep_idx'] = idx
+    return collected
+
+
 def run_once(cfg, state, first_run=False):
     zx = cfg.get('zectrix') or {}
     api_key = zx.get('api_key')
@@ -187,6 +240,12 @@ def run_once(cfg, state, first_run=False):
     # 先尝试从同步文件导入（浏览器快捷写入目录 -> NAS 同步落盘）
     maybe_import_from_file(cfg)
 
+    # 熔断冷却期内直接跳过本轮（风控未解除，不再发请求，避免越锁越死）。
+    # 上一轮推的错误图会一直留在墨水屏上，用户能看见。
+    if xueqiu.rl_is_blocked():
+        print('[rl] 熔断冷却中，跳过本轮（雪球风控未解除）')
+        return
+
     cookies = cookies_store.load_cookies()
     xq = (cookies.get('xueqiu') or {}).get('header')
     if not xq:
@@ -195,6 +254,10 @@ def run_once(cfg, state, first_run=False):
 
     try:
         followed = resolve_followed(cfg, xq)
+    except xueqiu.WafBlocked as e:
+        mins = xueqiu.rl_trip(str(e))
+        _push_error('雪球风控拦截\n%s\n已暂停 %d 分钟\n稍后自动恢复' % (str(e), mins), cfg)
+        return
     except Exception as e:
         _push_error('特别关注分组解析异常：\n%s' % e, cfg)
         return
@@ -207,19 +270,37 @@ def run_once(cfg, state, first_run=False):
         _push_error(reason, cfg)
         return
 
+    # 主取数：合并信息流（~3 次请求）+ 轮转深扫（每轮 3 人）
     try:
-        posts = xueqiu.fetch_all(followed, xq)
+        merged = xueqiu.fetch_merged_timeline(xq, pages=3, followed_ids=followed)
+        deep = _deep_scan(cfg, xq, followed, state)
+        seen_ids_dedup = set()
+        posts = []
+        for p in merged + deep:
+            pid = p.get('id')
+            if pid and pid not in seen_ids_dedup:
+                seen_ids_dedup.add(pid)
+                posts.append(p)
+        posts.sort(key=lambda x: x.get('time', 0), reverse=True)
+        print(f'[run] 合并流 {len(merged)} 条 + 深扫 {len(deep)} 条 → 去重后 {len(posts)} 条')
+    except xueqiu.WafBlocked as e:
+        mins = xueqiu.rl_trip(str(e))
+        _push_error('雪球风控拦截\n%s\n已暂停 %d 分钟\n稍后自动恢复' % (str(e), mins), cfg)
+        return
     except Exception as e:
         _push_error('雪球抓取异常：\n%s' % e, cfg)
         return
+
     if not posts:
         detail = getattr(xueqiu, 'LAST_ERROR', '') or ''
-        reason = '本周期未抓到任何帖子'
         if detail:
-            reason += '\n%s' % detail
-        reason += '\n请重新导出 Cookie'
-        _push_error(reason, cfg)
+            _push_error('本周期未抓到任何帖子\n%s' % detail, cfg)
+        else:
+            print('[run] 本周期无帖子（可能雪球暂无更新），保持上一屏不刷新')
         return
+
+    # 本轮完整跑通（未被风控中断）→ 复位退避计数
+    xueqiu.rl_reset()
 
     # 更新共享缓存，供手机 APP 的 GET /api/posts 读取（不触发新的抓取）
     server.set_recent_posts(posts)
