@@ -7,11 +7,11 @@
 
 单进程入口：python main.py（QNAP 上用 Task Scheduler 以 nohup 自启）。
 
-v2.1：移植雪哨 Chrome 扩展的防风控策略——
-  · 主取数改为「合并 home_timeline（~3 次请求）+ 轮转深扫（每轮 3 人）」，源头压低请求量；
-  · 接入 xueqiu 模块的风控熔断（rl_trip/rl_reset/rl_is_blocked）：命中 567/429 立即熔断、
-    指数退避、冷却期内跳过本轮、连续成功复位；
-  · 抓取失败时墨水屏满屏显示错误，让用户立刻发现。
+v2.5.0：在 v2.4.0 基础上「策略上彻底避风控」——
+  · 深扫（user_timeline 直查）默认关闭（XW_DEEP=1 才开）：该端点是爬虫特征端点，
+    v2.3.0 用它把账号 风控 锁死，连 home_timeline 都被 567 拦；
+  · 熔断退避拉长到 8 小时（首触 60 分钟）：风控惩罚以小时计，短退避只会反复撞墙；
+  · 主循环轮询间隔 ±30% 抖动 + 翻页间随机停顿：消除固定节拍的机器特征。
 """
 import os
 import json
@@ -27,7 +27,10 @@ import server
 
 STATE_FILE = os.environ.get('XW_STATE', 'state.json')
 GROUP_CACHE_FILE = os.environ.get('XW_GROUP', 'group_cache.json')  # 特别关注成员缓存
-DEEP_PER_CYCLE = int(os.environ.get('XW_DEEP', '5'))  # 每轮兜底深扫人数（轮转）
+# 兜底深扫（直查 user_timeline）默认关闭：该端点是「爬虫特征」端点，v2.3.0 用它把账号
+# 风控锁死。XW_DEEP=1 才开启（仅在确实需要覆盖合并流漏掉的低频用户时临时启用）。
+_DEEP_ENABLED = os.environ.get('XW_DEEP', '0') not in ('0', 'off', 'false', '')
+DEEP_PER_CYCLE = int(os.environ.get('XW_DEEP_N', '3'))  # 每轮兜底深扫人数（轮转）
 DEEP_BLOCK_COOLDOWN = int(os.environ.get('XW_DEEP_COOLDOWN', '600'))  # 深扫被风控后静默秒数
 _deep_blocked_until = 0.0  # 深扫被风控时记录，静默期内不再发 user_timeline 请求（避免越锁越死）
 
@@ -270,10 +273,11 @@ def run_once(cfg, state, first_run=False):
         _push_error(reason, cfg)
         return
 
-    # 主取数：合并信息流（~3 次请求）+ 轮转深扫（每轮 3 人）
+    # 主取数：合并信息流（~3 次请求）。兜底深扫默认关闭（XW_DEEP=1 才开），因为
+    # user_timeline 是爬虫特征端点，会触发账号级风控。
     try:
         merged = xueqiu.fetch_merged_timeline(xq, pages=3, followed_ids=followed)
-        deep = _deep_scan(cfg, xq, followed, state)
+        deep = _deep_scan(cfg, xq, followed, state) if _DEEP_ENABLED else []
         seen_ids_dedup = set()
         posts = []
         for p in merged + deep:
@@ -359,14 +363,16 @@ def main():
 
     state_existed = os.path.exists(STATE_FILE)
     state = load_state()
-    print(f'[main] 启动轮询，间隔 {interval} 分钟。Ctrl+C 退出。')
+    print(f'[main] 启动轮询，间隔 {interval} 分钟（±30% 抖动，避免固定节拍被识别为爬虫）。Ctrl+C 退出。')
     while True:
         try:
             run_once(cfg, state, first_run=not state_existed)
             state_existed = True
         except Exception as e:
             print('[run] 异常:', e)
-        time.sleep(interval * 60)
+        # 轮询间隔加 ±30% 随机抖动：消除「每 N 分钟整点一次」的机器特征
+        jittered = interval * 60 * (0.7 + random.random() * 0.6)
+        time.sleep(jittered)
 
 
 if __name__ == '__main__':
