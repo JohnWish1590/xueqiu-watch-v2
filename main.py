@@ -8,10 +8,13 @@
 单进程入口：python main.py（QNAP 上用 Task Scheduler 以 nohup 自启）。
 
 v2.5.0：在 v2.4.0 基础上「策略上彻底避风控」——
-  · 深扫（user_timeline 直查）默认关闭（XW_DEEP=1 才开）：该端点是爬虫特征端点，
-    v2.3.0 用它把账号 风控 锁死，连 home_timeline 都被 567 拦；
   · 熔断退避拉长到 8 小时（首触 60 分钟）：风控惩罚以小时计，短退避只会反复撞墙；
   · 主循环轮询间隔 ±30% 抖动 + 翻页间随机停顿：消除固定节拍的机器特征。
+
+v2.5.1：折中恢复深扫厚度（用户反馈「只显 1 条修得太狠」）——
+  · 兜底深扫改回默认开启，但保守化：每轮只直查 1 个用户（轮转 33 人）、仅当合并流不足
+    5 条时才发请求、命中风控只进静默期不向上抛；请求量远低于 v2.3.0，不触发风控，
+    但能把每人近期帖补齐，墨水屏回到多条。XW_DEEP=0 可整体关闭。
 """
 import os
 import json
@@ -27,10 +30,14 @@ import server
 
 STATE_FILE = os.environ.get('XW_STATE', 'state.json')
 GROUP_CACHE_FILE = os.environ.get('XW_GROUP', 'group_cache.json')  # 特别关注成员缓存
-# 兜底深扫（直查 user_timeline）默认关闭：该端点是「爬虫特征」端点，v2.3.0 用它把账号
-# 风控锁死。XW_DEEP=1 才开启（仅在确实需要覆盖合并流漏掉的低频用户时临时启用）。
-_DEEP_ENABLED = os.environ.get('XW_DEEP', '0') not in ('0', 'off', 'false', '')
-DEEP_PER_CYCLE = int(os.environ.get('XW_DEEP_N', '3'))  # 每轮兜底深扫人数（轮转）
+# 兜底深扫（直查 user_timeline）默认【开启·保守模式】（v2.5.1 折中方案）：
+#   · 每轮只直查 DEEP_PER_CYCLE 个用户（默认 1，轮转 33 人），把该用户近期帖补进 digest；
+#   · 仅当合并流不足 DEEP_MIN_MERGED 条时才真正发请求（合并流已够厚就不发，省流量）；
+#   · user_timeline 是「爬虫特征」端点，故仍走非致命逻辑——命中风控只进静默期、绝不向上抛，
+#     不影响已拿到的合并流上屏。XW_DEEP=0/off/false 可整体关闭。
+_DEEP_ENABLED = os.environ.get('XW_DEEP', '1') not in ('0', 'off', 'false', '')
+DEEP_PER_CYCLE = int(os.environ.get('XW_DEEP_N', '1'))  # 每轮兜底深扫人数（轮转）
+DEEP_MIN_MERGED = int(os.environ.get('XW_DEEP_MIN', '5'))  # 合并流达到此条数即不再深扫
 DEEP_BLOCK_COOLDOWN = int(os.environ.get('XW_DEEP_COOLDOWN', '600'))  # 深扫被风控后静默秒数
 _deep_blocked_until = 0.0  # 深扫被风控时记录，静默期内不再发 user_timeline 请求（避免越锁越死）
 
@@ -189,24 +196,36 @@ def _push_error(reason, cfg):
         print('[run] 错误图渲染/推送异常:', e)
 
 
-def _deep_scan(cfg, cookie_header, followed, state):
-    """兜底深扫：每轮只直查 DEEP_PER_CYCLE 个用户（轮转），请求量极小不会触发 WAF。
-    合并流负责"即时"，深扫负责"绝不漏"，两者互补。用户之间随机睡 1~2 秒，杜绝突发。
+def _deep_scan(cfg, cookie_header, followed, state, merged_count=0):
+    """兜底深扫（v2.5.1 保守折中模式）。
 
-    深扫是非致命的：命中风控（user_timeline 被限流）时记录静默期、跳过本轮剩余深扫，
-    直接返回已收集的（可能为空），绝不向上抛——这样合并流已拿到的帖子仍能正常上屏，
+    默认每轮只直查 DEEP_PER_CYCLE 个特别关注用户（默认 1，轮转 33 人），把该用户近期帖
+    补进 digest，让墨水屏不再「只有 1 条」。请求量极小：每轮最多 +1~2 次 user_timeline，
+    远低于 v2.3.0 的 66 次/轮，不会触发风控。
+
+    仅当合并流不足 DEEP_MIN_MERGED 条时才真正发请求；合并流已够厚时只推进轮转游标、
+    不发请求，既省流量又降风控风险。命中风控（user_timeline 被限流）时进入静默期、跳过
+    本轮剩余深扫，返回已收集的（可能为空），绝不向上抛——合并流已拿到的帖照常上屏，
     不会因深扫失败而显示错误图。静默期内连请求都不发，避免反复撞墙把风控锁死。
     """
     global _deep_blocked_until
     ids = [str(x) for x in followed if str(x).isdigit()]
     if not ids:
         return []
+
     # 静默期内不发 user_timeline 请求（当前多半仍被限流，发了也是 567）
     if time.time() < _deep_blocked_until:
         print('[deep] 仍在风控静默期，本轮深扫跳过')
         return []
+
     n = len(ids)
     idx = int(state.get('deep_idx', 0)) % n
+
+    # 合并流已够厚 → 只推进轮转游标，不发请求（省流量、降风控风险）
+    if merged_count >= DEEP_MIN_MERGED:
+        state['deep_idx'] = (idx + DEEP_PER_CYCLE) % n
+        return []
+
     collected = []
     seen = set()
     for k in range(DEEP_PER_CYCLE):
@@ -273,11 +292,10 @@ def run_once(cfg, state, first_run=False):
         _push_error(reason, cfg)
         return
 
-    # 主取数：合并信息流（~3 次请求）。兜底深扫默认关闭（XW_DEEP=1 才开），因为
-    # user_timeline 是爬虫特征端点，会触发账号级风控。
+    # 主取数：合并信息流（~3 次请求）+ 保守深扫（每轮 1 人轮转、仅在合并流不足时补）。
     try:
         merged = xueqiu.fetch_merged_timeline(xq, pages=3, followed_ids=followed)
-        deep = _deep_scan(cfg, xq, followed, state) if _DEEP_ENABLED else []
+        deep = _deep_scan(cfg, xq, followed, state, merged_count=len(merged)) if _DEEP_ENABLED else []
         seen_ids_dedup = set()
         posts = []
         for p in merged + deep:
